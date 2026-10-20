@@ -1,0 +1,55 @@
+name: Android JVM tests (supported-host fallback)
+
+# Termux Linux/aarch64 cannot initialize Robolectric's native runtime/Conscrypt.
+# Run only the missing JVM tests here, never an emulator or duplicate APK build.
+on:
+  push:
+    branches: ['v0.1.0-dev2']
+
+permissions:
+  contents: read
+
+jobs:
+  jvm-tests:
+    if: contains(github.event.head_commit.message, '[gh-fallback:android-jvm-tests.yml]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+      - name: Install compile SDK
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Verify source identity
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Run Android JVM regression tests
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+      - name: Require every gesture case on both SDKs
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          files = list(Path('app/build/test-results/testDebugUnitTest').glob('TEST-*.xml'))
+          roots = [ET.parse(path).getroot() for path in files]
+          cases = [case for root in roots for case in root.iter('testcase')]
+          assert len(cases) == 24, f'Expected 24 gesture cases, got {len(cases)}'
+          assert all(case.get('classname') == 'com.shaterguy.opentext.FlingEditTextTest' for case in cases)
+          assert not any(case.find(tag) is not None for case in cases for tag in ('failure', 'error', 'skipped'))
+          print('PASS: 24 gesture tests; source is the workflow head SHA')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: OpenText-JVM-tests-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: error
+          retention-days: 14

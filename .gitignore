@@ -9,3 +9,7 @@ local.properties
 *.jks
 *.keystore
 *.p12
+
+# Host-side release metadata tests
+__pycache__/
+*.pyc

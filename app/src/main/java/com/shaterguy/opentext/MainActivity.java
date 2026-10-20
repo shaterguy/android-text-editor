@@ -52,7 +52,7 @@ public final class MainActivity extends Activity {
     private static final int SURFACE = Color.rgb(247, 248, 252);
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private EditText editor;
+    private FlingEditText editor;
     private TextView title;
     private TextView status;
     private Button newButton;
@@ -181,7 +181,7 @@ public final class MainActivity extends Activity {
         paperParams.setMargins(dp(12), dp(4), dp(12), dp(5));
         root.addView(paper, paperParams);
 
-        editor = new EditText(this);
+        editor = new FlingEditText(this);
         editor.setGravity(Gravity.TOP | Gravity.START);
         editor.setTypeface(Typeface.MONOSPACE);
         editor.setTextSize(15);
@@ -628,9 +628,10 @@ public final class MainActivity extends Activity {
     }
 
     private void toggleWrap() {
+        editor.stopFling();
         wrapLines = !wrapLines;
         editor.setHorizontallyScrolling(!wrapLines);
-        editor.setSingleLine(false);
+        // Keep multiline input; setSingleLine(false) would reset horizontal scrolling.
         Toast.makeText(this, wrapLines ? "자동 줄바꿈 켜짐" : "자동 줄바꿈 꺼짐", Toast.LENGTH_SHORT).show();
     }
 
@@ -639,7 +640,10 @@ public final class MainActivity extends Activity {
         final int[] sizes = {12, 14, 15, 17, 19, 22};
         new AlertDialog.Builder(this)
                 .setTitle("편집기 글자 크기")
-                .setItems(names, (dialog, which) -> editor.setTextSize(sizes[which]))
+                .setItems(names, (dialog, which) -> {
+                    editor.stopFling();
+                    editor.setTextSize(sizes[which]);
+                })
                 .show();
     }
 

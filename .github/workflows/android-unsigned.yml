@@ -1,0 +1,58 @@
+name: Android unsigned release fallback
+
+# Optional fallback only when a verified local release APK cannot be produced.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact source SHA on main to package without signing
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned:
+    if: github.repository == 'shaterguy/android-text-editor' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -eu
+          echo "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+          git merge-base --is-ancestor "$SOURCE_SHA" "$GITHUB_SHA"
+          git checkout --detach "$SOURCE_SHA"
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Install SDK platform
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Build unsigned release
+        run: ./gradlew --no-daemon :app:assembleRelease
+      - name: Verify and describe unsigned handoff
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/opentext-handoff"
+          cp app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/opentext-handoff/OpenText-unsigned.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "$RUNNER_TEMP/opentext-handoff/OpenText-unsigned.apk"
+          python tools/release_metadata.py create --apk "$RUNNER_TEMP/opentext-handoff/OpenText-unsigned.apk" --metadata "$RUNNER_TEMP/opentext-handoff/release-metadata.json" --source "$SOURCE_SHA" --aapt "$ANDROID_HOME/build-tools/36.0.0/aapt" --environment "GitHub ubuntu-latest; Java21; run=$GITHUB_RUN_ID; attempt=$GITHUB_RUN_ATTEMPT"
+          (cd "$RUNNER_TEMP/opentext-handoff" && sha256sum ./*.apk ./*.json > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenText-unsigned-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/opentext-handoff/
+          if-no-files-found: error
+          retention-days: 14

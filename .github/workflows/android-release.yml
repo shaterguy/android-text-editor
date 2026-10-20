@@ -1,0 +1,111 @@
+name: Android signed release
+
+# Only an explicitly approved handoff on main may access signing secrets.
+# This workflow never executes Gradle or code from the requested source commit.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full verified source commit SHA (must be on main)
+        required: true
+        type: string
+      unsigned_asset_id:
+        description: Repository release asset ID of the verified unsigned APK
+        required: true
+        type: string
+      metadata_asset_id:
+        description: Repository release asset ID of its release-metadata.json
+        required: true
+        type: string
+      unsigned_sha256:
+        description: Independently verified unsigned APK SHA-256
+        required: true
+        type: string
+      metadata_sha256:
+        description: Independently verified metadata SHA-256
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    if: github.repository == 'shaterguy/android-text-editor' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Install signing tools only
+        run: sdkmanager "build-tools;36.0.0"
+      - name: Validate handoff and source before exposing secrets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          APK_ASSET_ID: ${{ inputs.unsigned_asset_id }}
+          METADATA_ASSET_ID: ${{ inputs.metadata_asset_id }}
+          APK_SHA256: ${{ inputs.unsigned_sha256 }}
+          METADATA_SHA256: ${{ inputs.metadata_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$APK_ASSET_ID" =~ ^[0-9]+$ && "$METADATA_ASSET_ID" =~ ^[0-9]+$ ]]
+          [[ "$APK_SHA256" =~ ^[0-9a-f]{64}$ && "$METADATA_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          git merge-base --is-ancestor "$SOURCE_SHA" "$GITHUB_SHA"
+          mkdir -p handoff signed
+          gh api "repos/$GITHUB_REPOSITORY/releases/assets/$APK_ASSET_ID" -H 'Accept: application/octet-stream' > handoff/unsigned.apk
+          gh api "repos/$GITHUB_REPOSITORY/releases/assets/$METADATA_ASSET_ID" -H 'Accept: application/octet-stream' > handoff/release-metadata.json
+          printf '%s  %s\n' "$APK_SHA256" handoff/unsigned.apk "$METADATA_SHA256" handoff/release-metadata.json | sha256sum --check --strict
+          python tools/release_metadata.py verify --apk handoff/unsigned.apk --metadata handoff/release-metadata.json --source "$SOURCE_SHA" --aapt "$ANDROID_HOME/build-tools/36.0.0/aapt"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 handoff/unsigned.apk
+      - name: Sign and verify exact APK
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          EXPECTED_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD EXPECTED_CERT_SHA256; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing signing configuration: $name"
+              exit 1
+            fi
+          done
+          [[ "$EXPECTED_CERT_SHA256" =~ ^[0-9a-fA-F:]{64,95}$ ]]
+          umask 077
+          trap 'rm -f "$RUNNER_TEMP/opentext-release.keystore"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/opentext-release.keystore"
+          test -s "$RUNNER_TEMP/opentext-release.keystore"
+          version=$(python -c 'import json; print(json.load(open("handoff/release-metadata.json"))["version_name"])')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]
+          output="signed/OpenText-v${version}-user-signed.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$RUNNER_TEMP/opentext-release.keystore" --ks-key-alias "$ANDROID_KEY_ALIAS" --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD --out "$output" handoff/unsigned.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$output" > signed/signature-verification.txt
+          python tools/release_metadata.py certificate --certificate-output signed/signature-verification.txt --expected-certificate "$EXPECTED_CERT_SHA256"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "$output"
+          cp handoff/release-metadata.json signed/unsigned-build-metadata.json
+          (cd signed && sha256sum ./*.apk > SHA256SUMS)
+      - name: Upload verified signed APK only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenText-user-signed-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: signed/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary signing file
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/opentext-release.keystore"
