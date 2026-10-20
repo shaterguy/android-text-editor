@@ -15,7 +15,7 @@ permissions:
 jobs:
   unsigned:
     if: github.repository == 'shaterguy/android-text-editor' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -35,9 +35,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
-      - name: Install SDK platform
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Verify preinstalled Android SDK (no package or license changes)
+        run: |
+          test -n "$ANDROID_HOME"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/aapt"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/zipalign"
+          test -f "$ANDROID_HOME/platforms/android-36/android.jar"
       - name: Build unsigned release
         run: ./gradlew --no-daemon :app:assembleRelease
       - name: Verify and describe unsigned handoff
